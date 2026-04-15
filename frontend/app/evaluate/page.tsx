@@ -1,611 +1,484 @@
 'use client';
 
-import Image from 'next/image';
 import Link from 'next/link';
-import {
-  ChangeEvent,
-  DragEvent,
-  MouseEvent as ReactMouseEvent,
-  WheelEvent as ReactWheelEvent,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
+import { useSearchParams } from 'next/navigation';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-type Phase = 'intuitive' | 'questionnaire' | 'structured' | 'constructive';
-type Impression = '明るい' | '暗い' | '楽しい' | '切ない' | '緊張感がある' | '落ち着く';
-type StampType = 'いいね' | '違和感' | '注目';
-type DrawTool = 'pen' | 'circle' | 'arrow';
-type DrawColor = '#ef4444' | '#f59e0b' | '#2563eb';
-
-interface FirstNoticeLog {
-  xPercent: number;
-  yPercent: number;
-  timeMs: number;
-}
-
-interface StampItem {
-  id: number;
-  type: StampType;
-  xPercent: number;
-  yPercent: number;
-}
-
-interface QuestionItem {
-  id:
-    | 'themeLogic'
-    | 'creativity'
-    | 'layoutComposition'
-    | 'spacePerspective'
-    | 'orderliness'
-    | 'lightShadow'
-    | 'color'
-    | 'detailTexture'
-    | 'overallDana'
-    | 'moodLi';
-  label: string;
-}
-
-
-
-const impressions: Impression[] = ['明るい', '暗い', '楽しい', '切ない', '緊張感がある', '落ち着く'];
-const stampOptions: Array<{ type: StampType; emoji: string; label: string }> = [
-  { type: 'いいね', emoji: '♡', label: 'いいね' },
-  { type: '違和感', emoji: '？', label: '違和感' },
-  { type: '注目', emoji: '◎', label: '注目' },
-];
-const drawTools: DrawTool[] = ['pen', 'circle', 'arrow'];
-const drawToolLabels: Record<DrawTool, string> = {
-  pen: 'フリーハンド',
-  circle: '丸',
-  arrow: '矢印',
-};
-const drawColors: DrawColor[] = ['#ef4444', '#f59e0b', '#2563eb'];
-const initialImage = '/kei.png';
-const questionItems: QuestionItem[] = [
-  { id: 'themeLogic', label: 'テーマと論理' },
-  { id: 'creativity', label: '創造性' },
-  { id: 'layoutComposition', label: 'レイアウトと構図' },
-  { id: 'spacePerspective', label: '空間と遠近感' },
-  { id: 'orderliness', label: '秩序感' },
-  { id: 'lightShadow', label: '光と影' },
-  { id: 'color', label: '色彩' },
-  { id: 'detailTexture', label: '細部と質感' },
-  { id: 'overallDana', label: '総合 Dana' },
-  { id: 'moodLi', label: 'ムード' },
-];
-
-const initialQuestionScores: Record<QuestionItem['id'], number> = {
-  themeLogic: 3,
-  creativity: 3,
-  layoutComposition: 3,
-  spacePerspective: 3,
-  orderliness: 3,
-  lightShadow: 3,
-  color: 3,
-  detailTexture: 3,
-  overallDana: 3,
-  moodLi: 3,
+type Candidate = {
+  id: string;
+  vector: {
+    eye_x: number;
+    eye_y: number;
+    eye_scale: number;
+  };
+  acquisition: number | null;
 };
 
-export default function UnifiedEvaluationPage() {
-  const [imageSrc, setImageSrc] = useState(initialImage);
-  const [imageError, setImageError] = useState(false);
-  const [currentPhase, setCurrentPhase] = useState<Phase>('intuitive');
+type SessionResponse = {
+  id: string;
+  goal: string;
+};
 
-  const [firstNotice, setFirstNotice] = useState<FirstNoticeLog | null>(null);
-  const [selectedImpression, setSelectedImpression] = useState<Impression | null>(null);
-  const [imageScale, setImageScale] = useState(1);
-  const [imageOrigin, setImageOrigin] = useState('50% 50%');
-  const [questionScores, setQuestionScores] = useState(initialQuestionScores);
+type BONextResponse = {
+  session_id: string;
+  round_index: number;
+  strategy: string;
+  training_size: number;
+  candidates: Candidate[];
+};
 
-  const [stamps, setStamps] = useState<StampItem[]>([]);
-  const [selectedStampType, setSelectedStampType] = useState<StampType>('いいね');
-  const [intentScore, setIntentScore] = useState(4);
+type LayerSnapshot = {
+  id: string;
+  name: string;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  imageDataUrl: string;
+  transform: LayerTransform;
+};
 
-  const [drawTool, setDrawTool] = useState<DrawTool>('pen');
-  const [drawColor, setDrawColor] = useState<DrawColor>('#ef4444');
-  const [drawWidth, setDrawWidth] = useState(4);
+type LayerTransform = {
+  x: number;
+  y: number;
+  rotation: number;
+  scale: number;
+  skewX: number;
+  skewY: number;
+  perspectiveX: number;
+  perspectiveY: number;
+};
 
-  const imageUrlRef = useRef<string | null>(null);
-  const containerRef = useRef<HTMLDivElement | null>(null);
+type RenderPayload = {
+  canvasSize: {
+    width: number;
+    height: number;
+  };
+  eyeLayerIds: string[];
+  baseImageDataUrl: string;
+  eyeLayers: LayerSnapshot[];
+};
+
+type RenderPayloadResponse = {
+  session_id: string;
+  payload: RenderPayload;
+};
+
+type RenderCacheWindow = Window & {
+  __feedbackArtRenderCache?: Record<string, RenderPayload>;
+};
+
+type CandidatePreviewProps = {
+  candidate: Candidate;
+  renderPayload: RenderPayload;
+};
+
+function CandidatePreview({ candidate, renderPayload }: CandidatePreviewProps) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
-    return () => {
-      if (imageUrlRef.current) {
-        URL.revokeObjectURL(imageUrlRef.current);
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+
+    const { width, height } = renderPayload.canvasSize;
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      return;
+    }
+
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = '#f8fafc';
+    ctx.fillRect(0, 0, width, height);
+
+    let alive = true;
+
+    const draw = async () => {
+      const baseImage = new Image();
+      baseImage.src = renderPayload.baseImageDataUrl;
+      await baseImage.decode();
+      if (!alive) {
+        return;
+      }
+      ctx.drawImage(baseImage, 0, 0, width, height);
+
+      for (const layer of renderPayload.eyeLayers) {
+        const image = new Image();
+        image.src = layer.imageDataUrl;
+        await image.decode();
+
+        if (!alive) {
+          return;
+        }
+
+        const base = layer.transform ?? {
+          x: 0,
+          y: 0,
+          rotation: 0,
+          scale: 1,
+          skewX: 0,
+          skewY: 0,
+          perspectiveX: 0,
+          perspectiveY: 0,
+        };
+
+        const applied = {
+          ...base,
+          x: base.x + candidate.vector.eye_x,
+          y: base.y + candidate.vector.eye_y,
+          scale: base.scale * (1 + candidate.vector.eye_scale / 100),
+        };
+
+        const centerX = layer.left + layer.width / 2;
+        const centerY = layer.top + layer.height / 2;
+
+        ctx.save();
+        ctx.translate(centerX + applied.x, centerY + applied.y);
+        ctx.rotate((applied.rotation * Math.PI) / 180);
+        ctx.scale(applied.scale, applied.scale);
+        ctx.drawImage(image, -layer.width / 2, -layer.height / 2, layer.width, layer.height);
+        ctx.restore();
       }
     };
-  }, []);
 
-  const handleImageUpload = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) {
-      return;
-    }
+    void draw();
 
-    if (imageUrlRef.current) {
-      URL.revokeObjectURL(imageUrlRef.current);
-    }
-
-    const nextUrl = URL.createObjectURL(file);
-    imageUrlRef.current = nextUrl;
-    setImageSrc(nextUrl);
-    setImageError(false);
-  };
-
-  const getCanvasPoint = (clientX: number, clientY: number) => {
-    if (!containerRef.current) {
-      return null;
-    }
-
-    const rect = containerRef.current.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) {
-      return null;
-    }
-
-    const xPercent = Math.min(100, Math.max(0, ((clientX - rect.left) / rect.width) * 100));
-    const yPercent = Math.min(100, Math.max(0, ((clientY - rect.top) / rect.height) * 100));
-
-    return { xPercent, yPercent };
-  };
-
-  const handleImageClick = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (currentPhase !== 'intuitive') {
-      return;
-    }
-
-    if (firstNotice) {
-      return;
-    }
-
-    const point = getCanvasPoint(event.clientX, event.clientY);
-    if (!point) {
-      return;
-    }
-
-    setFirstNotice({
-      ...point,
-      timeMs: Date.now(),
-    });
-  };
-
-  const handleWheelZoom = (event: ReactWheelEvent<HTMLDivElement>) => {
-    if (currentPhase !== 'intuitive') {
-      return;
-    }
-
-    event.preventDefault();
-    const point = getCanvasPoint(event.clientX, event.clientY);
-    if (!point) {
-      return;
-    }
-
-    const direction = event.deltaY > 0 ? -1 : 1;
-    const nextScale = Number(Math.min(3, Math.max(1, imageScale + direction * 0.15)).toFixed(2));
-    if (nextScale === imageScale) {
-      return;
-    }
-
-    setImageOrigin(`${point.xPercent}% ${point.yPercent}%`);
-    setImageScale(nextScale);
-  };
-
-
-
-  const handleStampDragStart = (event: DragEvent<HTMLButtonElement>, type: StampType) => {
-    event.dataTransfer.setData('text/plain', type);
-    event.dataTransfer.effectAllowed = 'copy';
-  };
-
-  const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    event.dataTransfer.dropEffect = 'copy';
-  };
-
-  const handleStampDrop = (event: DragEvent<HTMLDivElement>) => {
-    if (currentPhase !== 'structured') {
-      return;
-    }
-
-    event.preventDefault();
-    const type = event.dataTransfer.getData('text/plain') as StampType;
-    const point = getCanvasPoint(event.clientX, event.clientY);
-    if (!point) {
-      return;
-    }
-
-    const validType = stampOptions.some((option) => option.type === type) ? type : selectedStampType;
-    setStamps((current) => [
-      ...current,
-      {
-        id: Date.now() + current.length,
-        type: validType,
-        xPercent: point.xPercent,
-        yPercent: point.yPercent,
-      },
-    ]);
-  };
-
-  const exportPayload = useMemo(() => {
-    const base = {
-      phase: currentPhase,
+    return () => {
+      alive = false;
     };
-
-    if (currentPhase === 'intuitive') {
-      return {
-        ...base,
-        firstNotice,
-        selectedImpression,
-      };
-    }
-
-    if (currentPhase === 'questionnaire') {
-      return {
-        ...base,
-        questionScores,
-      };
-    }
-
-    if (currentPhase === 'structured') {
-      return {
-        ...base,
-        intentScore,
-        stamps,
-      };
-    }
-
-    return {
-      ...base,
-      drawTool,
-      drawColor,
-      drawWidth,
-    };
-  }, [
-    currentPhase,
-    firstNotice,
-    selectedImpression,
-    questionScores,
-    intentScore,
-    stamps,
-    drawTool,
-    drawColor,
-    drawWidth,
-  ]);
-
-  const handleCopyPayload = async () => {
-    await navigator.clipboard.writeText(JSON.stringify(exportPayload, null, 2));
-  };
-
-  const phaseLabel: Record<Phase, string> = {
-    intuitive: 'Intuitive & Implicit Phase',
-    questionnaire: 'Questionnaire Phase',
-    structured: 'Structured Visual Annotation',
-    constructive: 'Constructive Suggestions',
-  };
-
-  const questionAverage =
-    Math.round(
-      (Object.values(questionScores).reduce((sum, score) => sum + score, 0) / questionItems.length) * 10,
-    ) / 10;
+  }, [candidate, renderPayload]);
 
   return (
-    <main className={`min-h-screen bg-[radial-gradient(circle_at_20%_10%,#cffafe_0%,#f8fafc_44%,#ecfccb_100%)] flex flex-col`}>
-      <header className="flex items-center justify-between gap-4 border-b border-zinc-200 bg-white/90 px-6 py-4 backdrop-blur">
-        <div>
-          <p className="mb-1 text-xs font-semibold tracking-wide text-zinc-500">Iterative Canvas</p>
-          <h1 className="text-2xl font-black text-zinc-900">Unified Evaluation</h1>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {(['intuitive', 'questionnaire', 'structured', 'constructive'] as Phase[]).map((phase) => (
+    <canvas
+      ref={canvasRef}
+      className="h-full w-full rounded-lg border border-white/80 bg-white/60 object-contain"
+      style={{ aspectRatio: `${renderPayload.canvasSize.width} / ${renderPayload.canvasSize.height}` }}
+    />
+  );
+}
+
+const MAX_ROUNDS = 12;
+
+export default function EvaluatePage() {
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:8000/api/v1';
+  const searchParams = useSearchParams();
+  const sessionId = searchParams.get('session')?.trim() ?? '';
+
+  const [round, setRound] = useState(1);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [sessionGoal, setSessionGoal] = useState('');
+  const [sessionStatus, setSessionStatus] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
+  const [sessionError, setSessionError] = useState('');
+  const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const [boStrategy, setBoStrategy] = useState('');
+  const [trainingSize, setTrainingSize] = useState(0);
+  const [boStatus, setBoStatus] = useState<'idle' | 'loading' | 'submitting' | 'error'>('idle');
+  const [boError, setBoError] = useState('');
+  const [renderPayload, setRenderPayload] = useState<RenderPayload | null>(null);
+  const [showMetaPanels, setShowMetaPanels] = useState(false);
+
+  useEffect(() => {
+    if (!sessionId) {
+      setSessionStatus('error');
+      setSessionError('session パラメータがありません。');
+      return;
+    }
+
+    const controller = new AbortController();
+
+    const loadSession = async () => {
+      try {
+        setSessionStatus('loading');
+        setSessionError('');
+
+        const response = await fetch(`${apiBaseUrl}/sessions/${sessionId}`, {
+          method: 'GET',
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error(`Session fetch failed: ${response.status}`);
+        }
+
+        const data = (await response.json()) as SessionResponse;
+        setSessionGoal(data.goal);
+        setSessionStatus('loaded');
+      } catch (error) {
+        if (controller.signal.aborted) {
+          return;
+        }
+        console.error(error);
+        setSessionStatus('error');
+        setSessionError('セッション情報の取得に失敗しました。');
+      }
+    };
+
+    void loadSession();
+
+    return () => {
+      controller.abort();
+    };
+  }, [apiBaseUrl, sessionId]);
+
+  useEffect(() => {
+    if (!sessionId) {
+      setRenderPayload(null);
+      return;
+    }
+
+    const loadRenderPayload = async () => {
+      try {
+        const response = await fetch(`${apiBaseUrl}/sessions/${sessionId}/render-payload`, {
+          method: 'GET',
+        });
+
+        if (response.ok) {
+          const remote = (await response.json()) as RenderPayloadResponse;
+          setRenderPayload(remote.payload);
+          return;
+        }
+      } catch (error) {
+        console.warn('Could not fetch render payload from backend', error);
+      }
+
+      try {
+        const cacheWindow = window as RenderCacheWindow;
+        const fromMemory = cacheWindow.__feedbackArtRenderCache?.[sessionId];
+        if (fromMemory) {
+          setRenderPayload(fromMemory);
+          return;
+        }
+
+        const raw = localStorage.getItem(`feedback-art:session:${sessionId}:render`);
+        if (!raw) {
+          setRenderPayload(null);
+          return;
+        }
+
+        const parsed = JSON.parse(raw) as RenderPayload;
+        setRenderPayload(parsed);
+      } catch (error) {
+        console.error(error);
+        setRenderPayload(null);
+      }
+    };
+
+    void loadRenderPayload();
+  }, [apiBaseUrl, sessionId]);
+
+  const loadCandidates = useCallback(async (roundIndex: number) => {
+    const response = await fetch(
+      `${apiBaseUrl}/sessions/${sessionId}/bo/next?round_index=${roundIndex}&k=4`,
+      { method: 'GET' },
+    );
+
+    if (!response.ok) {
+      throw new Error(`BO candidate fetch failed: ${response.status}`);
+    }
+
+    const data = (await response.json()) as BONextResponse;
+    setCandidates(data.candidates);
+    setBoStrategy(data.strategy);
+    setTrainingSize(data.training_size);
+  }, [apiBaseUrl, sessionId]);
+
+  useEffect(() => {
+    if (sessionStatus !== 'loaded' || !sessionId) {
+      return;
+    }
+
+    const boot = async () => {
+      try {
+        setBoStatus('loading');
+        setBoError('');
+        await loadCandidates(1);
+        setRound(1);
+        setBoStatus('idle');
+      } catch (error) {
+        console.error(error);
+        setBoStatus('error');
+        setBoError('BO候補の取得に失敗しました。');
+      }
+    };
+
+    void boot();
+  }, [loadCandidates, sessionId, sessionStatus]);
+
+  const variants = useMemo(() => {
+    return candidates;
+  }, [candidates]);
+
+  const handlePick = async (id: string) => {
+    if (boStatus === 'loading' || boStatus === 'submitting' || !sessionId) {
+      return;
+    }
+
+    try {
+      setBoStatus('submitting');
+      setBoError('');
+
+      const feedbackResponse = await fetch(`${apiBaseUrl}/sessions/${sessionId}/bo/feedback`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          round_index: round,
+          chosen_id: id,
+          candidates: variants,
+        }),
+      });
+
+      if (!feedbackResponse.ok) {
+        throw new Error(`BO feedback failed: ${feedbackResponse.status}`);
+      }
+
+      setSelected((current) => [...current, `${round}:${id}`]);
+      const nextRound = Math.min(MAX_ROUNDS, round + 1);
+      setRound(nextRound);
+
+      if (nextRound < MAX_ROUNDS) {
+        await loadCandidates(nextRound);
+      }
+
+      setBoStatus('idle');
+    } catch (error) {
+      console.error(error);
+      setBoStatus('error');
+      setBoError('BOフィードバックの送信に失敗しました。');
+    }
+  };
+
+  const isDone = round >= MAX_ROUNDS;
+
+  return (
+    <main className="min-h-screen bg-[radial-gradient(circle_at_90%_10%,_#ffe4e6_0%,_#ecfeff_45%,_#f8fafc_100%)] px-2 py-6 sm:px-4">
+      <section className="mx-auto w-full rounded-2xl border border-rose-200/70 bg-white/90 p-4 shadow-[0_28px_90px_rgba(225,29,72,0.16)] backdrop-blur md:p-6">
+        <header className="mb-6 flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <p className="mb-2 inline-flex rounded-full bg-rose-100 px-3 py-1 text-xs font-semibold tracking-wide text-rose-800">
+              Step 2 / HITL
+            </p>
+            <h1 className="text-3xl font-black tracking-tight text-slate-900 md:text-4xl">Pairwise Evaluation Session</h1>
+            <p className="mt-2 text-sm text-slate-600">
+              共有URL経由でアクセスした評価者が、資料画像と意図を見て最も近い候補を選択するフェーズです。
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
             <button
-              key={phase}
               type="button"
-              onClick={() => setCurrentPhase(phase)}
-              className={`rounded-full border px-4 py-2 text-sm font-semibold transition ${currentPhase === phase ? 'border-blue-600 bg-blue-600 text-white' : 'border-zinc-300 bg-white text-zinc-700 hover:border-zinc-400'}`}
+              onClick={() => setShowMetaPanels((current) => !current)}
+              className="rounded-full border border-rose-300 bg-white px-4 py-2 text-sm font-semibold text-rose-700 hover:border-rose-400"
             >
-              Step {phase === 'intuitive' ? '2' : phase === 'questionnaire' ? '3' : phase === 'structured' ? '4' : '5'}
+              {showMetaPanels ? '情報を隠す' : '情報を表示'}
+            </button>
+            <Link href="/" className="rounded-full border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:border-slate-400">
+              Creator Setupへ戻る
+            </Link>
+          </div>
+        </header>
+
+        <div className="mb-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+          Round {Math.min(round, MAX_ROUNDS)} / {MAX_ROUNDS}
+        </div>
+
+        {showMetaPanels ? (
+          <div className="mb-4 grid gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-4 md:grid-cols-3">
+            <div>
+              <p className="text-xs font-semibold text-slate-500">Session</p>
+              <p className="text-sm font-bold text-slate-800">{sessionId || 'N/A'}</p>
+            </div>
+            <div>
+              <p className="text-xs font-semibold text-slate-500">Intent</p>
+              <p className="text-sm font-bold text-slate-800">
+                {sessionStatus === 'loading'
+                  ? '読み込み中...'
+                  : sessionGoal || 'セッションの意図が未設定です'}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs font-semibold text-slate-500">Round</p>
+              <p className="text-sm font-bold text-slate-800">
+                {Math.min(round, MAX_ROUNDS)} / {MAX_ROUNDS}
+              </p>
+            </div>
+          </div>
+        ) : null}
+
+        {sessionStatus === 'error' ? (
+          <p className="mb-6 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{sessionError}</p>
+        ) : null}
+
+        {showMetaPanels ? (
+          <div className="mb-4 grid gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-4 md:grid-cols-3">
+            <div>
+              <p className="text-xs font-semibold text-slate-500">BO Strategy</p>
+              <p className="text-sm font-bold text-slate-800">{boStrategy || 'loading'}</p>
+            </div>
+            <div>
+              <p className="text-xs font-semibold text-slate-500">Training Points</p>
+              <p className="text-sm font-bold text-slate-800">{trainingSize}</p>
+            </div>
+            <div>
+              <p className="text-xs font-semibold text-slate-500">Status</p>
+              <p className="text-sm font-bold text-slate-800">{boStatus}</p>
+            </div>
+          </div>
+        ) : null}
+
+        {boStatus === 'error' ? (
+          <p className="mb-6 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{boError}</p>
+        ) : null}
+
+        <section className="grid w-full gap-2 md:grid-cols-2 md:gap-2">
+          {variants.map((variant) => (
+            <button
+              key={variant.id}
+              type="button"
+              onClick={() => void handlePick(variant.id)}
+              disabled={isDone || boStatus === 'loading' || boStatus === 'submitting' || sessionStatus !== 'loaded'}
+              className="rounded-xl border border-slate-200 bg-white p-2 text-left transition hover:border-rose-300 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-70"
+            >
+              <div className="mb-2 aspect-[4/3] rounded-lg bg-[linear-gradient(130deg,#c7d2fe_0%,#f0f9ff_45%,#fee2e2_100%)] p-1">
+                {renderPayload ? (
+                  <CandidatePreview candidate={variant} renderPayload={renderPayload} />
+                ) : (
+                  <div className="grid h-full place-items-center rounded-lg border border-white/80 bg-white/70 text-xs font-semibold text-slate-600">
+                    Candidate {variant.id}
+                  </div>
+                )}
+              </div>
+              <p className="text-xs font-bold text-slate-800">候補 {variant.id}</p>
+              <p className="mt-0.5 text-[11px] text-slate-600">
+                delta: Eye x {variant.vector.eye_x}% / y {variant.vector.eye_y}% / scale {variant.vector.eye_scale}%
+              </p>
+              <p className="mt-1 text-[11px] text-rose-700">
+                acquisition: {variant.acquisition === null ? 'N/A' : variant.acquisition.toFixed(3)}
+              </p>
             </button>
           ))}
-        </div>
-        <Link
-          href="/"
-          className="rounded-full border border-zinc-300 bg-white px-4 py-2 text-sm font-semibold text-zinc-700 hover:border-zinc-400"
-        >
-          Context Sharingへ
-        </Link>
-      </header>
+        </section>
 
-      <div className="grid flex-1 grid-cols-1 gap-4 overflow-hidden lg:grid-cols-2">
-        <div className="flex flex-col bg-white/70 p-6 lg:border-r lg:border-zinc-200">
-          <div className="mb-4 rounded-xl border border-zinc-300 bg-white">
-            <input
-              type="file"
-              accept="image/*"
-              onChange={handleImageUpload}
-              className="block w-full rounded-lg px-3 py-2 text-sm text-zinc-700 file:mr-3 file:rounded-md file:border-0 file:bg-zinc-600 file:px-3 file:py-1.5 file:text-sm file:font-semibold file:text-white"
-            />
-          </div>
-
-          <div
-            ref={containerRef}
-            className="relative aspect-[4/3] flex-1 overflow-hidden rounded-2xl border border-zinc-300 bg-zinc-50"
-            onClick={handleImageClick}
-            onDragOver={handleDragOver}
-            onDrop={handleStampDrop}
-            onWheel={handleWheelZoom}
-          >
-            {!imageError ? (
-              <div
-                style={{
-                  transform: currentPhase === 'intuitive' ? `scale(${imageScale})` : 'scale(1)',
-                  transformOrigin: imageOrigin,
-                }}
-                className="h-full w-full transition-transform"
-              >
-                <Image
-                  src={imageSrc}
-                  alt="評価対象イラスト"
-                  fill
-                  unoptimized
-                  className="object-contain"
-                  onError={() => setImageError(true)}
-                />
-              </div>
-            ) : (
-              <div className="grid h-full place-items-center text-center text-sm text-zinc-500">
-                画像をアップロードしてください
-              </div>
-            )}
-
-            {currentPhase === 'intuitive' && firstNotice && (
-              <div
-                className="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-rose-500 bg-rose-500/30 px-2 py-1 text-xs font-semibold text-rose-800"
-                style={{ left: `${firstNotice.xPercent}%`, top: `${firstNotice.yPercent}%` }}
-              >
-                First Notice
-              </div>
-            )}
-
-            {currentPhase === 'structured' &&
-              stamps.map((stamp) => (
-                <div
-                  key={stamp.id}
-                  className="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/80 bg-white/70 px-2.5 py-1 text-2xl font-black text-zinc-900 shadow-lg backdrop-blur"
-                  style={{ left: `${stamp.xPercent}%`, top: `${stamp.yPercent}%` }}
-                >
-                  {stampOptions.find((option) => option.type === stamp.type)?.emoji}
-                </div>
-              ))}
-          </div>
-        </div>
-
-        <div className={`overflow-y-auto bg-white/90 p-6 backdrop-blur lg:border-l lg:border-zinc-200`}>
-          <h2 className="mb-4 text-lg font-black text-zinc-900">{phaseLabel[currentPhase]}</h2>
-
-          {currentPhase === 'intuitive' && (
-            <div className="space-y-4">
-              <section>
-                <h3 className="mb-2 text-sm font-semibold text-zinc-800">第一印象を選ぶ</h3>
-                <div className="flex flex-wrap gap-2">
-                  {impressions.map((item) => (
-                    <button
-                      key={item}
-                      type="button"
-                      onClick={() => setSelectedImpression(item)}
-                      className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
-                        selectedImpression === item
-                          ? 'border-zinc-900 bg-zinc-900 text-white'
-                          : 'border-zinc-300 bg-white text-zinc-700 hover:border-zinc-400'
-                      }`}
-                    >
-                      {item}
-                    </button>
-                  ))}
-                </div>
-              </section>
-
-              <section>
-                <h3 className="mb-2 text-sm font-semibold text-zinc-800">取得ログ</h3>
-                <div className="space-y-1 text-sm text-zinc-700">
-                  <p>First Notice: {firstNotice ? 'クリック済み' : '未クリック'}</p>
-                  <p>第一印象: {selectedImpression ?? '未選択'}</p>
-                </div>
-              </section>
-
-              <button
-                type="button"
-                onClick={handleCopyPayload}
-                className="w-full rounded-xl bg-zinc-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-zinc-800"
-              >
-                JSONをコピー
-              </button>
-            </div>
+        <section className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+          <h2 className="text-sm font-semibold text-slate-800">選択ログ</h2>
+          {selected.length === 0 ? (
+            <p className="mt-2 text-sm text-slate-500">まだ選択はありません。</p>
+          ) : (
+            <p className="mt-2 break-all text-sm text-slate-700">{selected.join(' | ')}</p>
           )}
-
-          {currentPhase === 'questionnaire' && (
-            <div className="space-y-4">
-              <section className="space-y-4">
-                {questionItems.map((item) => (
-                  <div key={item.id}>
-                    <div className="mb-2 flex items-center justify-between text-sm font-semibold text-zinc-800">
-                      <span>{item.label}</span>
-                      <span className="rounded-md bg-zinc-100 px-2 py-0.5 text-xs text-zinc-700">
-                        {questionScores[item.id]}/5
-                      </span>
-                    </div>
-                    <div className="mb-1 flex items-center justify-between text-[11px] text-zinc-500">
-                      <span>1</span>
-                      <span>5</span>
-                    </div>
-                    <input
-                      type="range"
-                      min={1}
-                      max={5}
-                      value={questionScores[item.id]}
-                      onChange={(event) => {
-                        const score = Number(event.target.value);
-                        setQuestionScores((current) => ({
-                          ...current,
-                          [item.id]: score,
-                        }));
-                      }}
-                      className="w-full accent-blue-600"
-                    />
-                  </div>
-                ))}
-              </section>
-
-              <section className="rounded-xl border border-zinc-200 bg-zinc-50 p-3 text-sm text-zinc-700">
-                <p className="mb-1 font-semibold text-zinc-800">質問フェーズ集計</p>
-                <p>平均スコア: {questionAverage}/5</p>
-              </section>
-
-              <button
-                type="button"
-                onClick={handleCopyPayload}
-                className="w-full rounded-xl bg-zinc-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-zinc-800"
-              >
-                JSONをコピー
-              </button>
-            </div>
-          )}
-
-          {currentPhase === 'structured' && (
-            <div className="space-y-4">
-              <section>
-                <h3 className="mb-2 text-sm font-semibold text-zinc-800">スタンプを選ぶ</h3>
-                <div className="flex flex-wrap gap-2">
-                  {stampOptions.map((option) => (
-                    <button
-                      key={option.type}
-                      type="button"
-                      draggable
-                      onDragStart={(event) => handleStampDragStart(event, option.type)}
-                      onClick={() => setSelectedStampType(option.type)}
-                      className={`flex items-center gap-1 rounded-full border px-3 py-1.5 text-sm font-semibold transition ${
-                        selectedStampType === option.type
-                          ? 'border-rose-600 bg-rose-600 text-white'
-                          : 'border-zinc-300 bg-white text-zinc-700 hover:border-zinc-400'
-                      }`}
-                    >
-                      <span className="text-base">{option.emoji}</span>
-                      {option.label}
-                    </button>
-                  ))}
-                </div>
-              </section>
-
-              <section>
-                <h3 className="mb-2 text-sm font-semibold text-zinc-800">意図の達成度</h3>
-                <div className="mb-2 flex items-center justify-between text-xs text-zinc-500">
-                  <span>1: ほぼ伝わらない</span>
-                  <span>7: かなり伝わる</span>
-                </div>
-                <input
-                  type="range"
-                  min={1}
-                  max={7}
-                  value={intentScore}
-                  onChange={(event) => setIntentScore(Number(event.target.value))}
-                  className="w-full accent-rose-600"
-                />
-                <div className="mt-3 flex items-center justify-between rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm">
-                  <span>スコア</span>
-                  <span className="font-black text-rose-700">{intentScore}/7</span>
-                </div>
-              </section>
-
-              <section>
-                <h3 className="mb-2 text-sm font-semibold text-zinc-800">配置済みスタンプ</h3>
-                <p className="text-sm text-zinc-700">{stamps.length} 個</p>
-              </section>
-
-              <button
-                type="button"
-                onClick={handleCopyPayload}
-                className="w-full rounded-xl bg-zinc-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-zinc-800"
-              >
-                JSONをコピー
-              </button>
-            </div>
-          )}
-
-          {currentPhase === 'constructive' && (
-            <div className="space-y-4">
-              <section>
-                <h3 className="mb-2 text-sm font-semibold text-zinc-800">描画ツール</h3>
-                <div className="mb-3 flex flex-wrap gap-2">
-                  {drawTools.map((tool) => (
-                    <button
-                      key={tool}
-                      type="button"
-                      onClick={() => setDrawTool(tool)}
-                      className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
-                        drawTool === tool
-                          ? 'border-sky-600 bg-sky-600 text-white'
-                          : 'border-zinc-300 bg-white text-zinc-700 hover:border-zinc-400'
-                      }`}
-                    >
-                      {drawToolLabels[tool]}
-                    </button>
-                  ))}
-                </div>
-
-                <div className="mb-3">
-                  <p className="mb-2 text-xs font-semibold text-zinc-800">色</p>
-                  <div className="flex gap-2">
-                    {drawColors.map((color) => (
-                      <button
-                        key={color}
-                        type="button"
-                        onClick={() => setDrawColor(color)}
-                        className={`h-7 w-7 rounded-full border-2 ${drawColor === color ? 'border-zinc-900' : 'border-white'}`}
-                        style={{ backgroundColor: color }}
-                      />
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <p className="mb-2 text-xs font-semibold text-zinc-800">太さ</p>
-                  <div className="flex gap-2">
-                    {[2, 4, 8].map((width) => (
-                      <button
-                        key={width}
-                        type="button"
-                        onClick={() => setDrawWidth(width)}
-                        className={`rounded-full border px-2.5 py-1 text-xs font-semibold transition ${
-                          drawWidth === width
-                            ? 'border-sky-600 bg-sky-600 text-white'
-                            : 'border-zinc-300 bg-white text-zinc-700 hover:border-zinc-400'
-                        }`}
-                      >
-                        {width}px
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </section>
-
-              <section className="rounded-xl border border-zinc-200 bg-zinc-50 p-3 text-sm text-zinc-700">
-                <p>・フリーハンドで気になる箇所を囲む</p>
-                <p>・丸で注目点を示す</p>
-                <p>・矢印で流れや視線誘導を提案する</p>
-              </section>
-
-              <button
-                type="button"
-                onClick={handleCopyPayload}
-                className="w-full rounded-xl bg-zinc-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-zinc-800"
-              >
-                JSONをコピー
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
+          {isDone ? (
+            <Link
+              href="/aggregation-dashboard"
+              className="mt-4 inline-flex rounded-full border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700 hover:border-emerald-400"
+            >
+              診断結果を確認する
+            </Link>
+          ) : null}
+        </section>
+      </section>
     </main>
   );
 }
