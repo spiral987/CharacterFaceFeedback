@@ -24,7 +24,15 @@ type BONextResponse = {
   round_index: number;
   strategy: string;
   training_size: number;
+  center: Candidate['vector'] | null;
   candidates: Candidate[];
+};
+
+type BOFinalResponse = {
+  session_id: string;
+  training_size: number;
+  strategy: string;
+  candidate: Candidate;
 };
 
 type LayerSnapshot = {
@@ -73,6 +81,236 @@ type CandidatePreviewProps = {
   renderPayload: RenderPayload;
 };
 
+type CenterVector = Candidate['vector'];
+
+type InteractiveCanvasProps = {
+  renderPayload: RenderPayload;
+  centerVector: CenterVector;
+  disabled: boolean;
+  onCenterChange: (next: CenterVector) => void;
+  onCommit: (next: CenterVector) => void;
+};
+
+type InteractiveCanvasAssets = {
+  baseImage: HTMLImageElement;
+  layerImages: Map<string, HTMLImageElement>;
+};
+
+const FACE_VIEWPORT_RATIO = 0.5;
+
+function parsePositiveInt(raw: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(raw ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+function getViewportSize(renderPayload: RenderPayload): { width: number; height: number } {
+  const width = renderPayload.canvasSize.width;
+  const height = Math.max(1, Math.round(renderPayload.canvasSize.height * FACE_VIEWPORT_RATIO));
+  return { width, height };
+}
+
+function InteractiveCanvas({
+  renderPayload,
+  centerVector,
+  disabled,
+  onCenterChange,
+  onCommit,
+}: InteractiveCanvasProps) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const dragStateRef = useRef<{ clientX: number; clientY: number; start: CenterVector } | null>(null);
+  const currentRef = useRef(centerVector);
+  const assetsRef = useRef<InteractiveCanvasAssets | null>(null);
+  const [assetsReady, setAssetsReady] = useState(false);
+
+  const drawVector = useCallback((vector: CenterVector) => {
+    const canvas = canvasRef.current;
+    const assets = assetsRef.current;
+    if (!canvas || !assets) {
+      return;
+    }
+
+    const { width, height } = getViewportSize(renderPayload);
+    if (canvas.width !== width) {
+      canvas.width = width;
+    }
+    if (canvas.height !== height) {
+      canvas.height = height;
+    }
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      return;
+    }
+
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = '#f8fafc';
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(
+      assets.baseImage,
+      0,
+      0,
+      renderPayload.canvasSize.width,
+      renderPayload.canvasSize.height * FACE_VIEWPORT_RATIO,
+      0,
+      0,
+      width,
+      height,
+    );
+
+    for (const layer of renderPayload.eyeLayers) {
+      const image = assets.layerImages.get(layer.id);
+      if (!image) {
+        continue;
+      }
+
+      const base = layer.transform ?? {
+        x: 0,
+        y: 0,
+        rotation: 0,
+        scale: 1,
+        skewX: 0,
+        skewY: 0,
+        perspectiveX: 0,
+        perspectiveY: 0,
+      };
+
+      const moveAmountX = renderPayload.canvasSize.width * (vector.eye_x / 100);
+      const moveAmountY = renderPayload.canvasSize.height * (vector.eye_y / 100);
+
+      const applied = {
+        ...base,
+        x: base.x + moveAmountX,
+        y: base.y + moveAmountY,
+        scale: base.scale * (1 + vector.eye_scale / 100),
+      };
+
+      const centerX = layer.left + layer.width / 2;
+      const centerY = layer.top + layer.height / 2;
+
+      ctx.save();
+      ctx.translate(centerX + applied.x, centerY + applied.y);
+      ctx.rotate((applied.rotation * Math.PI) / 180);
+      ctx.scale(applied.scale, applied.scale);
+      ctx.drawImage(image, -layer.width / 2, -layer.height / 2, layer.width, layer.height);
+      ctx.restore();
+    }
+  }, [renderPayload]);
+
+  useEffect(() => {
+    currentRef.current = centerVector;
+  }, [centerVector]);
+
+  useEffect(() => {
+    let alive = true;
+
+    const loadAssets = async () => {
+      setAssetsReady(false);
+
+      const baseImage = new Image();
+      baseImage.src = renderPayload.baseImageDataUrl;
+      await baseImage.decode();
+      if (!alive) {
+        return;
+      }
+
+      const decodedLayers = await Promise.all(
+        renderPayload.eyeLayers.map(async (layer) => {
+          const image = new Image();
+          image.src = layer.imageDataUrl;
+          await image.decode();
+          return { id: layer.id, image };
+        }),
+      );
+
+      if (!alive) {
+        return;
+      }
+
+      assetsRef.current = {
+        baseImage,
+        layerImages: new Map(decodedLayers.map((item) => [item.id, item.image])),
+      };
+      setAssetsReady(true);
+      drawVector(currentRef.current);
+    };
+
+    void loadAssets();
+
+    return () => {
+      alive = false;
+    };
+  }, [drawVector, renderPayload]);
+
+  useEffect(() => {
+    if (!assetsReady) {
+      return;
+    }
+    drawVector(centerVector);
+  }, [assetsReady, centerVector, drawVector]);
+
+  const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (disabled) {
+      return;
+    }
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragStateRef.current = {
+      clientX: event.clientX,
+      clientY: event.clientY,
+      start: { ...currentRef.current },
+    };
+  };
+
+  const handlePointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!dragStateRef.current || disabled) {
+      return;
+    }
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (!rect.width || !rect.height) {
+      return;
+    }
+
+    const deltaXPct = ((event.clientX - dragStateRef.current.clientX) / rect.width) * 100;
+    const deltaYPct = ((event.clientY - dragStateRef.current.clientY) / rect.height) * 100;
+
+    const next = {
+      eye_x: clamp(dragStateRef.current.start.eye_x + deltaXPct, -12, 12),
+      eye_y: clamp(dragStateRef.current.start.eye_y + deltaYPct, -12, 12),
+      eye_scale: dragStateRef.current.start.eye_scale,
+    };
+    currentRef.current = next;
+    drawVector(next);
+  };
+
+  const handlePointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!dragStateRef.current) {
+      return;
+    }
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    dragStateRef.current = null;
+    onCenterChange(currentRef.current);
+    onCommit(currentRef.current);
+  };
+
+  return (
+    <canvas
+      ref={canvasRef}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+      className="block h-auto w-full touch-none rounded-xl border border-white/80 bg-white/70"
+      style={{
+        aspectRatio: `${renderPayload.canvasSize.width} / ${Math.max(1, Math.round(renderPayload.canvasSize.height * FACE_VIEWPORT_RATIO))}`,
+        cursor: disabled ? 'not-allowed' : 'grab',
+      }}
+    />
+  );
+}
+
 function CandidatePreview({ candidate, renderPayload }: CandidatePreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -82,7 +320,7 @@ function CandidatePreview({ candidate, renderPayload }: CandidatePreviewProps) {
       return;
     }
 
-    const { width, height } = renderPayload.canvasSize;
+    const { width, height } = getViewportSize(renderPayload);
     canvas.width = width;
     canvas.height = height;
     const ctx = canvas.getContext('2d');
@@ -103,7 +341,17 @@ function CandidatePreview({ candidate, renderPayload }: CandidatePreviewProps) {
       if (!alive) {
         return;
       }
-      ctx.drawImage(baseImage, 0, 0, width, height);
+      ctx.drawImage(
+        baseImage,
+        0,
+        0,
+        renderPayload.canvasSize.width,
+        renderPayload.canvasSize.height * FACE_VIEWPORT_RATIO,
+        0,
+        0,
+        width,
+        height,
+      );
 
       for (const layer of renderPayload.eyeLayers) {
         const image = new Image();
@@ -125,10 +373,13 @@ function CandidatePreview({ candidate, renderPayload }: CandidatePreviewProps) {
           perspectiveY: 0,
         };
 
+        const moveAmountX = renderPayload.canvasSize.width * (candidate.vector.eye_x / 100);
+        const moveAmountY = renderPayload.canvasSize.height * (candidate.vector.eye_y / 100);
+
         const applied = {
           ...base,
-          x: base.x + candidate.vector.eye_x,
-          y: base.y + candidate.vector.eye_y,
+          x: base.x + moveAmountX,
+          y: base.y + moveAmountY,
           scale: base.scale * (1 + candidate.vector.eye_scale / 100),
         };
 
@@ -155,12 +406,15 @@ function CandidatePreview({ candidate, renderPayload }: CandidatePreviewProps) {
     <canvas
       ref={canvasRef}
       className="h-full w-full rounded-lg border border-white/80 bg-white/60 object-contain"
-      style={{ aspectRatio: `${renderPayload.canvasSize.width} / ${renderPayload.canvasSize.height}` }}
+      style={{
+        aspectRatio: `${renderPayload.canvasSize.width} / ${Math.max(1, Math.round(renderPayload.canvasSize.height * FACE_VIEWPORT_RATIO))}`,
+      }}
     />
   );
 }
 
-const MAX_ROUNDS = 12;
+const MAX_ROUNDS = parsePositiveInt(process.env.NEXT_PUBLIC_BO_MAX_ROUNDS, 12);
+const BO_CANDIDATE_COUNT = parsePositiveInt(process.env.NEXT_PUBLIC_BO_CANDIDATE_COUNT, 4);
 
 export default function EvaluatePage() {
   const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:8000/api/v1';
@@ -179,6 +433,8 @@ export default function EvaluatePage() {
   const [boError, setBoError] = useState('');
   const [renderPayload, setRenderPayload] = useState<RenderPayload | null>(null);
   const [showMetaPanels, setShowMetaPanels] = useState(false);
+  const [finalBoResult, setFinalBoResult] = useState<BOFinalResponse | null>(null);
+  const [centerVector, setCenterVector] = useState<CenterVector>({ eye_x: 0, eye_y: 0, eye_scale: 0 });
 
   useEffect(() => {
     if (!sessionId) {
@@ -269,11 +525,30 @@ export default function EvaluatePage() {
     void loadRenderPayload();
   }, [apiBaseUrl, sessionId]);
 
-  const loadCandidates = useCallback(async (roundIndex: number) => {
-    const response = await fetch(
-      `${apiBaseUrl}/sessions/${sessionId}/bo/next?round_index=${roundIndex}&k=4`,
-      { method: 'GET' },
-    );
+  const loadCandidates = useCallback(async (
+    roundIndex: number,
+    options?: {
+      center?: CenterVector;
+      trustRegion?: { x: number; y: number; scale: number };
+    },
+  ) => {
+    const query = new URLSearchParams({
+      round_index: String(roundIndex),
+      k: String(BO_CANDIDATE_COUNT),
+    });
+
+    if (options?.center) {
+      query.set('center_x', options.center.eye_x.toFixed(4));
+      query.set('center_y', options.center.eye_y.toFixed(4));
+      query.set('center_scale', options.center.eye_scale.toFixed(4));
+    }
+    if (options?.trustRegion) {
+      query.set('trust_radius_x', options.trustRegion.x.toFixed(4));
+      query.set('trust_radius_y', options.trustRegion.y.toFixed(4));
+      query.set('trust_radius_scale', options.trustRegion.scale.toFixed(4));
+    }
+
+    const response = await fetch(`${apiBaseUrl}/sessions/${sessionId}/bo/next?${query.toString()}`, { method: 'GET' });
 
     if (!response.ok) {
       throw new Error(`BO candidate fetch failed: ${response.status}`);
@@ -283,6 +558,38 @@ export default function EvaluatePage() {
     setCandidates(data.candidates);
     setBoStrategy(data.strategy);
     setTrainingSize(data.training_size);
+    if (data.center) {
+      setCenterVector(data.center);
+    }
+  }, [apiBaseUrl, sessionId]);
+
+  const buildTrustRegion = useCallback(() => {
+    if (!renderPayload) {
+      return { x: 0.6, y: 0.6, scale: 2.0 };
+    }
+    return {
+      // Convert 3px radius to BO's percent unit.
+      x: (3 / renderPayload.canvasSize.width) * 100,
+      y: (3 / renderPayload.canvasSize.height) * 100,
+      scale: 2.0,
+    };
+  }, [renderPayload]);
+
+  const loadFinalBoResult = useCallback(async () => {
+    if (!sessionId) {
+      return;
+    }
+
+    const response = await fetch(`${apiBaseUrl}/sessions/${sessionId}/bo/final`, {
+      method: 'GET',
+    });
+
+    if (!response.ok) {
+      throw new Error(`BO final result fetch failed: ${response.status}`);
+    }
+
+    const data = (await response.json()) as BOFinalResponse;
+    setFinalBoResult(data);
   }, [apiBaseUrl, sessionId]);
 
   useEffect(() => {
@@ -337,11 +644,20 @@ export default function EvaluatePage() {
       }
 
       setSelected((current) => [...current, `${round}:${id}`]);
+      const chosen = variants.find((variant) => variant.id === id);
+      if (chosen) {
+        setCenterVector(chosen.vector);
+      }
       const nextRound = Math.min(MAX_ROUNDS, round + 1);
       setRound(nextRound);
 
       if (nextRound < MAX_ROUNDS) {
-        await loadCandidates(nextRound);
+        await loadCandidates(nextRound, {
+          center: chosen?.vector ?? centerVector,
+          trustRegion: buildTrustRegion(),
+        });
+      } else {
+        await loadFinalBoResult();
       }
 
       setBoStatus('idle');
@@ -353,6 +669,27 @@ export default function EvaluatePage() {
   };
 
   const isDone = round >= MAX_ROUNDS;
+
+  const handleCenterCommit = useCallback(async (next: CenterVector) => {
+    if (boStatus === 'loading' || boStatus === 'submitting' || !sessionId || isDone) {
+      return;
+    }
+
+    try {
+      setBoStatus('loading');
+      setBoError('');
+      setCenterVector(next);
+      await loadCandidates(round, {
+        center: next,
+        trustRegion: buildTrustRegion(),
+      });
+      setBoStatus('idle');
+    } catch (error) {
+      console.error(error);
+      setBoStatus('error');
+      setBoError('局所候補の取得に失敗しました。');
+    }
+  }, [boStatus, sessionId, isDone, loadCandidates, round, buildTrustRegion]);
 
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_90%_10%,_#ffe4e6_0%,_#ecfeff_45%,_#f8fafc_100%)] px-2 py-6 sm:px-4">
@@ -433,16 +770,121 @@ export default function EvaluatePage() {
           <p className="mb-6 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{boError}</p>
         ) : null}
 
-        <section className="grid w-full gap-2 md:grid-cols-2 md:gap-2">
+        {isDone ? (
+          <section className="mt-6 rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+            <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+              <div>
+                <h2 className="text-sm font-semibold text-emerald-900">探索終了後の最適推定イラスト</h2>
+                <p className="text-xs text-emerald-800">
+                  最後の観測までを使って、BOが次に推す1件を再計算した結果です。
+                </p>
+              </div>
+              {finalBoResult ? (
+                <p className="text-xs font-semibold text-emerald-800">
+                  strategy: {finalBoResult.strategy} / training: {finalBoResult.training_size}
+                </p>
+              ) : null}
+            </div>
+
+            {finalBoResult && renderPayload ? (
+              <div className="grid gap-4 lg:grid-cols-[1fr_280px]">
+                <div className="overflow-hidden rounded-xl border border-emerald-200 bg-white p-2">
+                  <CandidatePreview candidate={finalBoResult.candidate} renderPayload={renderPayload} />
+                </div>
+                <div className="rounded-xl border border-emerald-200 bg-white p-4 text-sm text-slate-700">
+                  <p className="font-semibold text-slate-900">推定パラメータ</p>
+                  <p className="mt-2">Eye x: {finalBoResult.candidate.vector.eye_x}%</p>
+                  <p>Eye y: {finalBoResult.candidate.vector.eye_y}%</p>
+                  <p>Eye scale: {finalBoResult.candidate.vector.eye_scale}%</p>
+                  <p className="mt-3 text-xs text-slate-500">
+                    acquisition: {finalBoResult.candidate.acquisition === null ? 'N/A' : finalBoResult.candidate.acquisition.toFixed(3)}
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <p className="rounded-xl border border-emerald-200 bg-white px-3 py-4 text-sm text-emerald-900">
+                最終候補を取得中です。
+              </p>
+            )}
+          </section>
+        ) : null}
+
+        <section className="mb-6 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+          <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="text-base font-bold text-slate-900">メイン操作キャンバス</h2>
+              <p className="text-xs text-slate-600">
+                目レイヤーをドラッグして大まかに位置を決めると、その近傍だけでBOが再探索します。
+              </p>
+            </div>
+            <div className="min-w-[240px] rounded-xl border border-slate-200 bg-white p-3">
+              <p className="text-xs font-semibold text-slate-600">Scale 微調整</p>
+              <input
+                type="range"
+                min={-20}
+                max={20}
+                step={0.1}
+                value={centerVector.eye_scale}
+                disabled={isDone || boStatus === 'loading' || boStatus === 'submitting'}
+                onChange={(event) => {
+                  const next = {
+                    ...centerVector,
+                    eye_scale: Number.parseFloat(event.target.value),
+                  };
+                  setCenterVector(next);
+                }}
+                className="mt-2 w-full"
+              />
+              <p className="mt-2 text-xs text-slate-500">
+                x {centerVector.eye_x.toFixed(2)}% / y {centerVector.eye_y.toFixed(2)}% / scale {centerVector.eye_scale.toFixed(2)}%
+              </p>
+              <button
+                type="button"
+                onClick={() => void handleCenterCommit(centerVector)}
+                disabled={isDone || boStatus === 'loading' || boStatus === 'submitting' || !renderPayload}
+                className="mt-2 rounded-lg border border-rose-300 bg-rose-50 px-3 py-1 text-xs font-semibold text-rose-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                この位置で候補更新
+              </button>
+            </div>
+          </div>
+
+          <div className="mx-auto w-full max-w-[920px] overflow-hidden rounded-xl border border-slate-200 bg-white p-2">
+            {renderPayload ? (
+              <InteractiveCanvas
+                renderPayload={renderPayload}
+                centerVector={centerVector}
+                disabled={isDone || boStatus === 'loading' || boStatus === 'submitting'}
+                onCenterChange={setCenterVector}
+                onCommit={(next) => {
+                  void handleCenterCommit(next);
+                }}
+              />
+            ) : (
+              <div className="grid aspect-[4/3] place-items-center rounded-xl border border-slate-200 bg-slate-100 text-sm text-slate-500">
+                レンダー情報の読み込み待ちです。
+              </div>
+            )}
+          </div>
+        </section>
+
+        <section className="grid w-full gap-0.5 md:grid-cols-2 md:gap-0.5">
           {variants.map((variant) => (
             <button
               key={variant.id}
               type="button"
               onClick={() => void handlePick(variant.id)}
               disabled={isDone || boStatus === 'loading' || boStatus === 'submitting' || sessionStatus !== 'loaded'}
-              className="rounded-xl border border-slate-200 bg-white p-2 text-left transition hover:border-rose-300 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-70"
+              className="rounded-lg border border-slate-200 bg-white p-0.5 text-left transition hover:border-rose-300 disabled:cursor-not-allowed disabled:opacity-70"
             >
-              <div className="mb-2 aspect-[4/3] rounded-lg bg-[linear-gradient(130deg,#c7d2fe_0%,#f0f9ff_45%,#fee2e2_100%)] p-1">
+              <div
+                className="rounded-md bg-[linear-gradient(130deg,#c7d2fe_0%,#f0f9ff_45%,#fee2e2_100%)] p-0.5"
+                style={{
+                  aspectRatio: renderPayload
+                    ? `${renderPayload.canvasSize.width} / ${Math.max(1, Math.round(renderPayload.canvasSize.height * FACE_VIEWPORT_RATIO))}`
+                    : '4 / 3',
+                }}
+              >
                 {renderPayload ? (
                   <CandidatePreview candidate={variant} renderPayload={renderPayload} />
                 ) : (
@@ -451,13 +893,6 @@ export default function EvaluatePage() {
                   </div>
                 )}
               </div>
-              <p className="text-xs font-bold text-slate-800">候補 {variant.id}</p>
-              <p className="mt-0.5 text-[11px] text-slate-600">
-                delta: Eye x {variant.vector.eye_x}% / y {variant.vector.eye_y}% / scale {variant.vector.eye_scale}%
-              </p>
-              <p className="mt-1 text-[11px] text-rose-700">
-                acquisition: {variant.acquisition === null ? 'N/A' : variant.acquisition.toFixed(3)}
-              </p>
             </button>
           ))}
         </section>

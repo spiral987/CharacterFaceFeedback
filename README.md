@@ -19,6 +19,14 @@ npm run dev
 
 Open http://localhost:3000.
 
+Optional frontend env vars (`frontend/.env.local`):
+
+```bash
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8000/api/v1
+NEXT_PUBLIC_BO_MAX_ROUNDS=12
+NEXT_PUBLIC_BO_CANDIDATE_COUNT=4
+```
+
 ## Backend Development
 
 ```bash

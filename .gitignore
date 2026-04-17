@@ -62,3 +62,6 @@ __pycache__/
 /backend/venv/
 /backend/dist/
 /backend/build/
+
+# psd files
+*.psd

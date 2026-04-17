@@ -81,6 +81,7 @@ const DEFAULT_TRANSFORM: LayerTransform = {
   perspectiveY: 0,
 };
 const WARP_GRID = 8;
+const DEFAULT_DEBUG_PSD_ENDPOINT = '/sessions/debug/default-psd';
 
 function normalizeLabel(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, '_');
@@ -341,6 +342,74 @@ export default function HomePage() {
     };
   }, []);
 
+  const loadPsdFromBuffer = (buffer: ArrayBuffer, sourceName: string) => {
+    const psd = readPsd(new Uint8Array(buffer), {
+      skipCompositeImageData: false,
+      skipLayerImageData: false,
+    }) as PsdNode;
+
+    const visibleLayers = findVisibleLayers(psd.children);
+    const extracted = findTargetLayers(psd.children);
+
+    if (visibleLayers.length === 0) {
+      setLayers([]);
+      setTargetLayers([]);
+      setSelectedLayerId('');
+      setTransforms({});
+      setErrorText('表示中のレイヤーが見つかりませんでした。hidden の状態を確認してください。');
+      return;
+    }
+
+    setPsdName(sourceName);
+    setLayers(visibleLayers);
+    setTargetLayers(extracted);
+    setSelectedLayerId(extracted[0]?.id ?? visibleLayers[0].id);
+    setTransforms(
+      visibleLayers.reduce<Record<string, LayerTransform>>((acc, layer) => {
+        acc[layer.id] = DEFAULT_TRANSFORM;
+        return acc;
+      }, {}),
+    );
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadDefaultPsd = async () => {
+      try {
+        setErrorText('');
+        const response = await fetch(`${apiBaseUrl}${DEFAULT_DEBUG_PSD_ENDPOINT}`);
+        if (!response.ok) {
+          throw new Error(`Default PSD fetch failed: ${response.status}`);
+        }
+
+        const buffer = await response.arrayBuffer();
+        if (cancelled) {
+          return;
+        }
+
+        loadPsdFromBuffer(buffer, 'chinatsu.psd');
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+
+        console.error(error);
+        setLayers([]);
+        setTargetLayers([]);
+        setSelectedLayerId('');
+        setTransforms({});
+        setErrorText('デフォルトPSDの自動読み込みに失敗しました。backend/chinatsu.psd と API の状態を確認してください。');
+      }
+    };
+
+    void loadDefaultPsd();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [apiBaseUrl]);
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) {
@@ -403,33 +472,7 @@ export default function HomePage() {
     try {
       setErrorText('');
       const buffer = await file.arrayBuffer();
-      const psd = readPsd(new Uint8Array(buffer), {
-        skipCompositeImageData: false,
-        skipLayerImageData: false,
-      }) as PsdNode;
-
-      const visibleLayers = findVisibleLayers(psd.children);
-      const extracted = findTargetLayers(psd.children);
-
-      if (visibleLayers.length === 0) {
-        setLayers([]);
-        setTargetLayers([]);
-        setSelectedLayerId('');
-        setTransforms({});
-        setErrorText('表示中のレイヤーが見つかりませんでした。hidden の状態を確認してください。');
-        return;
-      }
-
-      setPsdName(file.name);
-      setLayers(visibleLayers);
-      setTargetLayers(extracted);
-      setSelectedLayerId(extracted[0]?.id ?? visibleLayers[0].id);
-      setTransforms(
-        visibleLayers.reduce<Record<string, LayerTransform>>((acc, layer) => {
-          acc[layer.id] = DEFAULT_TRANSFORM;
-          return acc;
-        }, {}),
-      );
+      loadPsdFromBuffer(buffer, file.name);
     } catch (error) {
       setErrorText('PSDの解析に失敗しました。8bit RGBAで書き出したPSDを試してください。');
       setLayers([]);
@@ -590,7 +633,10 @@ export default function HomePage() {
 
         <div className="grid gap-6 lg:grid-cols-[1.45fr_1fr]">
           <section className="space-y-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-            <label className="text-sm font-semibold text-slate-800">1. WIP PSDをアップロード</label>
+            <label className="text-sm font-semibold text-slate-800">1. デフォルトPSDを自動読込 (chinatsu.psd)</label>
+            <p className="text-xs text-slate-500">
+              起動時に backend/chinatsu.psd を毎回読み込みます。必要なら下の入力で一時的に別PSDへ差し替えできます。
+            </p>
             <input
               type="file"
               accept=".psd"

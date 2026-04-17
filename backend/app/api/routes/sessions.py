@@ -1,9 +1,13 @@
 from fastapi import APIRouter, HTTPException, status
 import logging
+from pathlib import Path
+from fastapi.responses import FileResponse
 
 from app.schemas.session import (
     BOFeedbackRequest,
     BOFeedbackResponse,
+    BOFinalResultResponse,
+    BOVector,
     BONextCandidatesResponse,
     DiagnosisResponse,
     SessionRenderPayloadResponse,
@@ -17,6 +21,7 @@ from app.services.store import store
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 logger = logging.getLogger(__name__)
+DEFAULT_PSD_PATH = Path(__file__).resolve().parents[3] / "chinatsu.psd"
 
 
 @router.post("", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
@@ -49,9 +54,48 @@ def get_diagnosis(session_id: str) -> DiagnosisResponse:
 
 
 @router.get("/{session_id}/bo/next", response_model=BONextCandidatesResponse)
-def get_next_bo_candidates(session_id: str, round_index: int = 1, k: int = 4) -> BONextCandidatesResponse:
-    logger.info("[API] GET /sessions/%s/bo/next?round_index=%s&k=%s", session_id, round_index, k)
-    candidate_set = store.next_bo_candidates(session_id=session_id, round_index=round_index, k=k)
+def get_next_bo_candidates(
+    session_id: str,
+    round_index: int = 1,
+    k: int = 4,
+    center_x: float = 0.0,
+    center_y: float = 0.0,
+    center_scale: float = 0.0,
+    trust_radius_x: float = 0.0,
+    trust_radius_y: float = 0.0,
+    trust_radius_scale: float = 0.0,
+) -> BONextCandidatesResponse:
+    logger.info(
+        "[API] GET /sessions/%s/bo/next?round_index=%s&k=%s&center_x=%s&center_y=%s&center_scale=%s",
+        session_id,
+        round_index,
+        k,
+        center_x,
+        center_y,
+        center_scale,
+    )
+    use_local_bo = any(
+        [
+            center_x != 0.0,
+            center_y != 0.0,
+            center_scale != 0.0,
+            trust_radius_x > 0,
+            trust_radius_y > 0,
+            trust_radius_scale > 0,
+        ]
+    )
+    center_vector = BOVector(eye_x=center_x, eye_y=center_y, eye_scale=center_scale) if use_local_bo else None
+    trust_region = None
+    if trust_radius_x > 0 or trust_radius_y > 0 or trust_radius_scale > 0:
+        trust_region = (trust_radius_x, trust_radius_y, trust_radius_scale)
+
+    candidate_set = store.next_bo_candidates(
+        session_id=session_id,
+        round_index=round_index,
+        k=k,
+        center_vector=center_vector,
+        trust_region=trust_region,
+    )
     if not candidate_set:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
     logger.info(
@@ -85,6 +129,22 @@ def create_bo_feedback(session_id: str, payload: BOFeedbackRequest) -> BOFeedbac
     return result
 
 
+@router.get("/{session_id}/bo/final", response_model=BOFinalResultResponse)
+def get_final_bo_result(session_id: str) -> BOFinalResultResponse:
+    logger.info("[API] GET /sessions/%s/bo/final", session_id)
+    result = store.build_bo_final_result(session_id)
+    if not result:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="BO result not available")
+    logger.info(
+        "[API] BO final response: session_id=%s strategy=%s training_size=%s candidate=%s",
+        session_id,
+        result.strategy,
+        result.training_size,
+        result.candidate.id,
+    )
+    return result
+
+
 @router.post("/{session_id}/render-payload", response_model=SessionRenderPayloadResponse, status_code=status.HTTP_201_CREATED)
 def upsert_render_payload(session_id: str, payload: SessionRenderPayloadUpsertRequest) -> SessionRenderPayloadResponse:
     result = store.set_render_payload(session_id=session_id, payload=payload.payload)
@@ -99,3 +159,15 @@ def get_render_payload(session_id: str) -> SessionRenderPayloadResponse:
     if not result:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Render payload not found")
     return result
+
+
+@router.get("/debug/default-psd")
+def get_default_psd() -> FileResponse:
+    if not DEFAULT_PSD_PATH.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Default PSD not found")
+
+    return FileResponse(
+        path=DEFAULT_PSD_PATH,
+        media_type="application/octet-stream",
+        filename=DEFAULT_PSD_PATH.name,
+    )

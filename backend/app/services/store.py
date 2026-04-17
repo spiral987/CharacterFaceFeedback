@@ -7,6 +7,8 @@ from uuid import uuid4
 from app.schemas.session import (
     BOFeedbackRequest,
     BOFeedbackResponse,
+    BOFinalResultResponse,
+    BOVector,
     BONextCandidatesResponse,
     CandidateDelta,
     DiagnosisDelta,
@@ -100,6 +102,8 @@ class InMemorySessionStore:
         session_id: str,
         round_index: int,
         k: int,
+        center_vector: BOVector | None = None,
+        trust_region: tuple[float, float, float] | None = None,
     ) -> BONextCandidatesResponse | None:
         if session_id not in self._sessions:
             return None
@@ -112,7 +116,13 @@ class InMemorySessionStore:
             k,
             len(observations),
         )
-        candidates, strategy = generate_candidates(observations, k, debug=self._bo_debug)
+        candidates, strategy = generate_candidates(
+            observations,
+            k,
+            center_vector=center_vector,
+            trust_region=trust_region,
+            debug=self._bo_debug,
+        )
         logger.info(
             "[BO] next generated: session_id=%s round=%s strategy=%s candidates=%s",
             session_id,
@@ -126,6 +136,7 @@ class InMemorySessionStore:
             round_index=round_index,
             strategy=strategy,
             training_size=len(observations),
+            center=center_vector,
             candidates=candidates,
         )
 
@@ -168,6 +179,33 @@ class InMemorySessionStore:
                 round_index=payload.round_index,
                 stored_points=len(self._bo_observations[session_id]),
             )
+
+    def build_bo_final_result(self, session_id: str) -> BOFinalResultResponse | None:
+        if session_id not in self._sessions:
+            return None
+
+        observations = self._bo_observations.get(session_id, [])
+        if not observations:
+            return None
+
+        candidates, strategy = generate_candidates(observations, 1, debug=self._bo_debug)
+        if not candidates:
+            return None
+
+        logger.info(
+            "[BO] final result built: session_id=%s strategy=%s training_size=%s candidate=%s",
+            session_id,
+            strategy,
+            len(observations),
+            candidates[0].id,
+        )
+
+        return BOFinalResultResponse(
+            session_id=session_id,
+            training_size=len(observations),
+            strategy=strategy,
+            candidate=candidates[0],
+        )
 
     def set_render_payload(self, session_id: str, payload: dict) -> SessionRenderPayloadResponse | None:
         with self._lock:

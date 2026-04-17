@@ -67,7 +67,17 @@ class BONextCandidatesResponse(BaseModel):
     round_index: int
     strategy: str
     training_size: int
+    center: BOVector | None = None
     candidates: list[BOCandidate]
+
+
+class BONextQuery(BaseModel):
+    center_x: float = 0.0
+    center_y: float = 0.0
+    center_scale: float = 0.0
+    trust_radius_x: float = Field(default=0.0, ge=0)
+    trust_radius_y: float = Field(default=0.0, ge=0)
+    trust_radius_scale: float = Field(default=0.0, ge=0)
 
 
 class BOFeedbackRequest(BaseModel):
@@ -80,6 +90,13 @@ class BOFeedbackResponse(BaseModel):
     session_id: str
     round_index: int
     stored_points: int
+
+
+class BOFinalResultResponse(BaseModel):
+    session_id: str
+    training_size: int
+    strategy: str
+    candidate: BOCandidate
 
 
 class SessionRenderPayloadUpsertRequest(BaseModel):
