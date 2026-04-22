@@ -8,7 +8,9 @@ from app.schemas.session import (
     BOFeedbackRequest,
     BOFeedbackResponse,
     BOFinalResultResponse,
-    BOVector,
+    BOCandidate,
+    BOVectorMacro,
+    BOVectorMicro,
     BONextCandidatesResponse,
     CandidateDelta,
     DiagnosisDelta,
@@ -20,7 +22,14 @@ from app.schemas.session import (
     SessionResponse,
 )
 from app.core.config import get_settings
-from app.services.bo import BOObservation, generate_candidates
+from app.services.bo import (
+    BOObservationMacro,
+    BOObservationMicro,
+    default_macro_vector,
+    default_micro_vector,
+    generate_candidates_macro,
+    generate_candidates_micro,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +41,10 @@ class InMemorySessionStore:
         self._bo_debug = settings.bo_debug
         self._sessions: dict[str, SessionResponse] = {}
         self._selections: dict[str, list[SelectionResponse]] = defaultdict(list)
-        self._bo_observations: dict[str, list[BOObservation]] = defaultdict(list)
+        self._bo_observations_macro: dict[str, list[BOObservationMacro]] = defaultdict(list)
+        self._bo_observations_micro: dict[str, list[BOObservationMicro]] = defaultdict(list)
+        self._bo_best_macro: dict[str, BOVectorMacro] = {}
+        self._bo_best_micro: dict[str, BOVectorMicro] = {}
         self._render_payloads: dict[str, dict] = {}
 
     def create_session(self, payload: SessionCreateRequest) -> SessionResponse:
@@ -102,27 +114,53 @@ class InMemorySessionStore:
         session_id: str,
         round_index: int,
         k: int,
-        center_vector: BOVector | None = None,
-        trust_region: tuple[float, float, float] | None = None,
     ) -> BONextCandidatesResponse | None:
         if session_id not in self._sessions:
             return None
 
-        observations = self._bo_observations.get(session_id, [])
+        active_subspace = "macro" if round_index % 2 == 1 else "micro"
+        observations_macro = self._bo_observations_macro.get(session_id, [])
+        observations_micro = self._bo_observations_micro.get(session_id, [])
+
+        best_macro = self._bo_best_macro.get(session_id, default_macro_vector())
+        best_micro = self._bo_best_micro.get(session_id, default_micro_vector())
+
         logger.info(
-            "[BO] next requested: session_id=%s round=%s k=%s observations=%s",
+            "[BO] next requested: session_id=%s round=%s k=%s active_subspace=%s obs_macro=%s obs_micro=%s",
             session_id,
             round_index,
             k,
-            len(observations),
+            active_subspace,
+            len(observations_macro),
+            len(observations_micro),
         )
-        candidates, strategy = generate_candidates(
-            observations,
-            k,
-            center_vector=center_vector,
-            trust_region=trust_region,
-            debug=self._bo_debug,
-        )
+
+        candidates: list[BOCandidate] = []
+        if active_subspace == "macro":
+            macro_vectors, strategy = generate_candidates_macro(observations_macro, k)
+            candidates = [
+                BOCandidate(
+                    id=f"cand-{index + 1}",
+                    macro=macro_vector,
+                    micro=best_micro,
+                    acquisition=None,
+                )
+                for index, macro_vector in enumerate(macro_vectors)
+            ]
+            training_size = len(observations_macro)
+        else:
+            micro_vectors, strategy = generate_candidates_micro(observations_micro, k)
+            candidates = [
+                BOCandidate(
+                    id=f"cand-{index + 1}",
+                    macro=best_macro,
+                    micro=micro_vector,
+                    acquisition=None,
+                )
+                for index, micro_vector in enumerate(micro_vectors)
+            ]
+            training_size = len(observations_micro)
+
         logger.info(
             "[BO] next generated: session_id=%s round=%s strategy=%s candidates=%s",
             session_id,
@@ -134,9 +172,9 @@ class InMemorySessionStore:
         return BONextCandidatesResponse(
             session_id=session_id,
             round_index=round_index,
+            active_subspace=active_subspace,
             strategy=strategy,
-            training_size=len(observations),
-            center=center_vector,
+            training_size=training_size,
             candidates=candidates,
         )
 
@@ -156,55 +194,76 @@ class InMemorySessionStore:
                 return BOFeedbackResponse(
                     session_id=session_id,
                     round_index=payload.round_index,
-                    stored_points=len(self._bo_observations[session_id]),
+                    stored_points=len(self._bo_observations_macro[session_id])
+                    + len(self._bo_observations_micro[session_id]),
                 )
 
+            active_subspace = "macro" if payload.round_index % 2 == 1 else "micro"
             for candidate in payload.candidates:
                 reward = 1.0 if candidate.id == payload.chosen_id else 0.0
-                self._bo_observations[session_id].append(
-                    BOObservation(vector=candidate.vector, reward=reward)
-                )
+                if active_subspace == "macro":
+                    self._bo_observations_macro[session_id].append(
+                        BOObservationMacro(vector=candidate.macro, reward=reward)
+                    )
+                else:
+                    self._bo_observations_micro[session_id].append(
+                        BOObservationMicro(vector=candidate.micro, reward=reward)
+                    )
+
+            if active_subspace == "macro":
+                self._bo_best_macro[session_id] = chosen.macro
+            else:
+                self._bo_best_micro[session_id] = chosen.micro
 
             logger.info(
-                "[BO] feedback stored: session_id=%s round=%s chosen_id=%s added=%s total=%s",
+                "[BO] feedback stored: session_id=%s round=%s chosen_id=%s subspace=%s added=%s total=%s",
                 session_id,
                 payload.round_index,
                 payload.chosen_id,
+                active_subspace,
                 len(payload.candidates),
-                len(self._bo_observations[session_id]),
+                len(self._bo_observations_macro[session_id]) + len(self._bo_observations_micro[session_id]),
             )
 
             return BOFeedbackResponse(
                 session_id=session_id,
                 round_index=payload.round_index,
-                stored_points=len(self._bo_observations[session_id]),
+                stored_points=len(self._bo_observations_macro[session_id])
+                + len(self._bo_observations_micro[session_id]),
             )
 
     def build_bo_final_result(self, session_id: str) -> BOFinalResultResponse | None:
         if session_id not in self._sessions:
             return None
 
-        observations = self._bo_observations.get(session_id, [])
-        if not observations:
+        observations_macro = self._bo_observations_macro.get(session_id, [])
+        observations_micro = self._bo_observations_micro.get(session_id, [])
+        if not observations_macro and not observations_micro:
             return None
 
-        candidates, strategy = generate_candidates(observations, 1, debug=self._bo_debug)
-        if not candidates:
-            return None
+        best_macro = self._bo_best_macro.get(session_id, default_macro_vector())
+        best_micro = self._bo_best_micro.get(session_id, default_micro_vector())
+
+        candidate = BOCandidate(
+            id="cand-final",
+            macro=best_macro,
+            micro=best_micro,
+            acquisition=None,
+        )
 
         logger.info(
             "[BO] final result built: session_id=%s strategy=%s training_size=%s candidate=%s",
             session_id,
-            strategy,
-            len(observations),
-            candidates[0].id,
+            "composed-best",
+            len(observations_macro) + len(observations_micro),
+            candidate.id,
         )
 
         return BOFinalResultResponse(
             session_id=session_id,
-            training_size=len(observations),
-            strategy=strategy,
-            candidate=candidates[0],
+            training_size=len(observations_macro) + len(observations_micro),
+            strategy="composed-best",
+            candidate=candidate,
         )
 
     def set_render_payload(self, session_id: str, payload: dict) -> SessionRenderPayloadResponse | None:

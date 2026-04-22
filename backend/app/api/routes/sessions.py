@@ -7,7 +7,6 @@ from app.schemas.session import (
     BOFeedbackRequest,
     BOFeedbackResponse,
     BOFinalResultResponse,
-    BOVector,
     BONextCandidatesResponse,
     DiagnosisResponse,
     SessionRenderPayloadResponse,
@@ -58,43 +57,18 @@ def get_next_bo_candidates(
     session_id: str,
     round_index: int = 1,
     k: int = 4,
-    center_x: float = 0.0,
-    center_y: float = 0.0,
-    center_scale: float = 0.0,
-    trust_radius_x: float = 0.0,
-    trust_radius_y: float = 0.0,
-    trust_radius_scale: float = 0.0,
 ) -> BONextCandidatesResponse:
     logger.info(
-        "[API] GET /sessions/%s/bo/next?round_index=%s&k=%s&center_x=%s&center_y=%s&center_scale=%s",
+        "[API] GET /sessions/%s/bo/next?round_index=%s&k=%s",
         session_id,
         round_index,
         k,
-        center_x,
-        center_y,
-        center_scale,
     )
-    use_local_bo = any(
-        [
-            center_x != 0.0,
-            center_y != 0.0,
-            center_scale != 0.0,
-            trust_radius_x > 0,
-            trust_radius_y > 0,
-            trust_radius_scale > 0,
-        ]
-    )
-    center_vector = BOVector(eye_x=center_x, eye_y=center_y, eye_scale=center_scale) if use_local_bo else None
-    trust_region = None
-    if trust_radius_x > 0 or trust_radius_y > 0 or trust_radius_scale > 0:
-        trust_region = (trust_radius_x, trust_radius_y, trust_radius_scale)
 
     candidate_set = store.next_bo_candidates(
         session_id=session_id,
         round_index=round_index,
         k=k,
-        center_vector=center_vector,
-        trust_region=trust_region,
     )
     if not candidate_set:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")

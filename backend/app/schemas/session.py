@@ -50,34 +50,37 @@ class DiagnosisResponse(BaseModel):
     delta_summary: list[DiagnosisDelta] = Field(default_factory=list)
 
 
-class BOVector(BaseModel):
-    eye_x: float = Field(ge=-12, le=12)
-    eye_y: float = Field(ge=-12, le=12)
-    eye_scale: float = Field(ge=-20, le=20)
+class BOVectorMacro(BaseModel):
+    global_x: float = Field(ge=-2, le=2)
+    global_y: float = Field(ge=-2, le=2)
+    global_scale: float = Field(ge=-6, le=6)
+
+
+class BOVectorMicro(BaseModel):
+    upper_eye_rotation: float = Field(ge=-20, le=20)
+    pupil_x: float = Field(ge=-2, le=2)
+    lower_upper_distance_y: float = Field(ge=-2, le=2)
 
 
 class BOCandidate(BaseModel):
     id: str
-    vector: BOVector
+    macro: BOVectorMacro
+    micro: BOVectorMicro
     acquisition: float | None = None
 
 
 class BONextCandidatesResponse(BaseModel):
     session_id: str
     round_index: int
+    active_subspace: str
     strategy: str
     training_size: int
-    center: BOVector | None = None
     candidates: list[BOCandidate]
 
 
 class BONextQuery(BaseModel):
-    center_x: float = 0.0
-    center_y: float = 0.0
-    center_scale: float = 0.0
-    trust_radius_x: float = Field(default=0.0, ge=0)
-    trust_radius_y: float = Field(default=0.0, ge=0)
-    trust_radius_scale: float = Field(default=0.0, ge=0)
+    round_index: int = Field(ge=1, le=100)
+    k: int = Field(default=4, ge=2, le=9)
 
 
 class BOFeedbackRequest(BaseModel):

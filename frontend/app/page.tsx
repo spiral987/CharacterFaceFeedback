@@ -69,7 +69,15 @@ type PsdNode = {
   children?: PsdNode[];
 };
 
-const TARGET_LAYER_NAMES = ['eye'];
+const TARGET_LAYER_GROUP_NAMES = ['eye'];
+const TARGET_MICRO_LAYER_NAMES = [
+  'l_upper_eye',
+  'r_upper_eye',
+  'l_pupil',
+  'r_pupil',
+  'l_lower_eye',
+  'r_lower_eye',
+];
 const DEFAULT_TRANSFORM: LayerTransform = {
   x: 0,
   y: 0,
@@ -149,14 +157,31 @@ function findVisibleLayers(nodes: PsdNode[] | undefined): ExtractedLayer[] {
 }
 
 function findTargetLayers(nodes: PsdNode[] | undefined): ExtractedLayer[] {
-  return flattenLayers(nodes)
+  const flattened = flattenLayers(nodes);
+  const groupRootIds = flattened
     .filter(({ visible, node }) => visible && !!node.name)
     .filter(({ node }) => {
       const label = normalizeLabel(node.name ?? '');
-      return TARGET_LAYER_NAMES.some((target) => label === target);
+      return TARGET_LAYER_GROUP_NAMES.some((target) => label === target);
+    })
+    .map(({ id }) => id);
+
+  const selected = flattened
+    .filter(({ visible, node }) => visible && !!node.name)
+    .filter(({ id, node }) => {
+      const label = normalizeLabel(node.name ?? '');
+      const inTargetGroup = groupRootIds.some((rootId) => id === rootId || id.startsWith(`${rootId}-`));
+      const isMicroLayer = TARGET_MICRO_LAYER_NAMES.includes(label);
+      return inTargetGroup || isMicroLayer;
     })
     .map(buildLayerRecord)
     .filter((layer): layer is ExtractedLayer => layer !== null);
+
+  const deduped = new Map<string, ExtractedLayer>();
+  selected.forEach((layer) => {
+    deduped.set(layer.id, layer);
+  });
+  return [...deduped.values()];
 }
 
 function lerp(a: number, b: number, t: number): number {
@@ -488,6 +513,11 @@ export default function HomePage() {
       return;
     }
 
+    if (targetLayerCount === 0) {
+      setErrorText('BO対象レイヤーが0件です。eyeフォルダー配下か、L_/R_ の目レイヤー名を確認してください。');
+      return;
+    }
+
     try {
       setIsCreatingSession(true);
       setErrorText('');
@@ -503,7 +533,7 @@ export default function HomePage() {
             psd_name: psdName,
             visible_layer_count: visibleLayerCount,
             target_layer_count: targetLayerCount,
-            target_layer_name: 'eye',
+            target_layer_name: 'eye-group-and-micro-layers',
             target_layer_ids: targetLayers.map((layer) => layer.id),
             target_layer_display_names: targetLayers.map((layer) => layer.name),
           },

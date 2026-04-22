@@ -6,10 +6,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 type Candidate = {
   id: string;
-  vector: {
-    eye_x: number;
-    eye_y: number;
-    eye_scale: number;
+  macro: {
+    global_x: number;
+    global_y: number;
+    global_scale: number;
+  };
+  micro: {
+    upper_eye_rotation: number;
+    pupil_x: number;
+    lower_upper_distance_y: number;
   };
   acquisition: number | null;
 };
@@ -22,9 +27,9 @@ type SessionResponse = {
 type BONextResponse = {
   session_id: string;
   round_index: number;
+  active_subspace: 'macro' | 'micro';
   strategy: string;
   training_size: number;
-  center: Candidate['vector'] | null;
   candidates: Candidate[];
 };
 
@@ -81,14 +86,15 @@ type CandidatePreviewProps = {
   renderPayload: RenderPayload;
 };
 
-type CenterVector = Candidate['vector'];
+type MacroVector = Candidate['macro'];
+type MicroVector = Candidate['micro'];
 
 type InteractiveCanvasProps = {
   renderPayload: RenderPayload;
-  centerVector: CenterVector;
+  macroVector: MacroVector;
+  microVector: MicroVector;
   disabled: boolean;
-  onCenterChange: (next: CenterVector) => void;
-  onCommit: (next: CenterVector) => void;
+  onMacroChange: (next: MacroVector) => void;
 };
 
 type InteractiveCanvasAssets = {
@@ -97,6 +103,7 @@ type InteractiveCanvasAssets = {
 };
 
 const FACE_VIEWPORT_RATIO = 0.5;
+const UPPER_EYE_ROTATION_RENDER_SCALE = 0.5;
 
 function parsePositiveInt(raw: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(raw ?? '', 10);
@@ -113,20 +120,67 @@ function getViewportSize(renderPayload: RenderPayload): { width: number; height:
   return { width, height };
 }
 
+function resolveLayerTransform(
+  layer: LayerSnapshot,
+  macro: MacroVector,
+  micro: MicroVector,
+  canvasSize: RenderPayload['canvasSize'],
+): LayerTransform {
+  const base = layer.transform ?? {
+    x: 0,
+    y: 0,
+    rotation: 0,
+    scale: 1,
+    skewX: 0,
+    skewY: 0,
+    perspectiveX: 0,
+    perspectiveY: 0,
+  };
+
+  let x = base.x + canvasSize.width * (macro.global_x / 100);
+  let y = base.y + canvasSize.height * (macro.global_y / 100);
+  let rotation = base.rotation;
+  const scale = base.scale * (1 + macro.global_scale / 100);
+
+  if (layer.name.includes('Pupil')) {
+    x += canvasSize.width * (micro.pupil_x / 100);
+  }
+
+  if (layer.name.includes('Lower_Eye')) {
+    y += canvasSize.height * (micro.lower_upper_distance_y / 100);
+  }
+
+  if (layer.name.includes('Upper_Eye')) {
+    if (layer.name.includes('L_')) {
+      rotation += micro.upper_eye_rotation * UPPER_EYE_ROTATION_RENDER_SCALE;
+    } else if (layer.name.includes('R_')) {
+      rotation -= micro.upper_eye_rotation * UPPER_EYE_ROTATION_RENDER_SCALE;
+    }
+  }
+
+  return {
+    ...base,
+    x,
+    y,
+    rotation,
+    scale,
+  };
+}
+
 function InteractiveCanvas({
   renderPayload,
-  centerVector,
+  macroVector,
+  microVector,
   disabled,
-  onCenterChange,
-  onCommit,
+  onMacroChange,
 }: InteractiveCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const dragStateRef = useRef<{ clientX: number; clientY: number; start: CenterVector } | null>(null);
-  const currentRef = useRef(centerVector);
+  const dragStateRef = useRef<{ clientX: number; clientY: number; start: MacroVector } | null>(null);
+  const currentRef = useRef(macroVector);
   const assetsRef = useRef<InteractiveCanvasAssets | null>(null);
   const [assetsReady, setAssetsReady] = useState(false);
 
-  const drawVector = useCallback((vector: CenterVector) => {
+  const drawVector = useCallback((vector: MacroVector) => {
     const canvas = canvasRef.current;
     const assets = assetsRef.current;
     if (!canvas || !assets) {
@@ -166,27 +220,7 @@ function InteractiveCanvas({
       if (!image) {
         continue;
       }
-
-      const base = layer.transform ?? {
-        x: 0,
-        y: 0,
-        rotation: 0,
-        scale: 1,
-        skewX: 0,
-        skewY: 0,
-        perspectiveX: 0,
-        perspectiveY: 0,
-      };
-
-      const moveAmountX = renderPayload.canvasSize.width * (vector.eye_x / 100);
-      const moveAmountY = renderPayload.canvasSize.height * (vector.eye_y / 100);
-
-      const applied = {
-        ...base,
-        x: base.x + moveAmountX,
-        y: base.y + moveAmountY,
-        scale: base.scale * (1 + vector.eye_scale / 100),
-      };
+      const applied = resolveLayerTransform(layer, vector, microVector, renderPayload.canvasSize);
 
       const centerX = layer.left + layer.width / 2;
       const centerY = layer.top + layer.height / 2;
@@ -198,11 +232,11 @@ function InteractiveCanvas({
       ctx.drawImage(image, -layer.width / 2, -layer.height / 2, layer.width, layer.height);
       ctx.restore();
     }
-  }, [renderPayload]);
+  }, [microVector, renderPayload]);
 
   useEffect(() => {
-    currentRef.current = centerVector;
-  }, [centerVector]);
+    currentRef.current = macroVector;
+  }, [macroVector]);
 
   useEffect(() => {
     let alive = true;
@@ -249,8 +283,8 @@ function InteractiveCanvas({
     if (!assetsReady) {
       return;
     }
-    drawVector(centerVector);
-  }, [assetsReady, centerVector, drawVector]);
+    drawVector(macroVector);
+  }, [assetsReady, macroVector, drawVector]);
 
   const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (disabled) {
@@ -277,9 +311,9 @@ function InteractiveCanvas({
     const deltaYPct = ((event.clientY - dragStateRef.current.clientY) / rect.height) * 100;
 
     const next = {
-      eye_x: clamp(dragStateRef.current.start.eye_x + deltaXPct, -12, 12),
-      eye_y: clamp(dragStateRef.current.start.eye_y + deltaYPct, -12, 12),
-      eye_scale: dragStateRef.current.start.eye_scale,
+      global_x: clamp(dragStateRef.current.start.global_x + deltaXPct, -2, 2),
+      global_y: clamp(dragStateRef.current.start.global_y + deltaYPct, -2, 2),
+      global_scale: dragStateRef.current.start.global_scale,
     };
     currentRef.current = next;
     drawVector(next);
@@ -291,8 +325,7 @@ function InteractiveCanvas({
     }
     event.currentTarget.releasePointerCapture(event.pointerId);
     dragStateRef.current = null;
-    onCenterChange(currentRef.current);
-    onCommit(currentRef.current);
+    onMacroChange(currentRef.current);
   };
 
   return (
@@ -362,26 +395,12 @@ function CandidatePreview({ candidate, renderPayload }: CandidatePreviewProps) {
           return;
         }
 
-        const base = layer.transform ?? {
-          x: 0,
-          y: 0,
-          rotation: 0,
-          scale: 1,
-          skewX: 0,
-          skewY: 0,
-          perspectiveX: 0,
-          perspectiveY: 0,
-        };
-
-        const moveAmountX = renderPayload.canvasSize.width * (candidate.vector.eye_x / 100);
-        const moveAmountY = renderPayload.canvasSize.height * (candidate.vector.eye_y / 100);
-
-        const applied = {
-          ...base,
-          x: base.x + moveAmountX,
-          y: base.y + moveAmountY,
-          scale: base.scale * (1 + candidate.vector.eye_scale / 100),
-        };
+        const applied = resolveLayerTransform(
+          layer,
+          candidate.macro,
+          candidate.micro,
+          renderPayload.canvasSize,
+        );
 
         const centerX = layer.left + layer.width / 2;
         const centerY = layer.top + layer.height / 2;
@@ -434,7 +453,13 @@ export default function EvaluatePage() {
   const [renderPayload, setRenderPayload] = useState<RenderPayload | null>(null);
   const [showMetaPanels, setShowMetaPanels] = useState(false);
   const [finalBoResult, setFinalBoResult] = useState<BOFinalResponse | null>(null);
-  const [centerVector, setCenterVector] = useState<CenterVector>({ eye_x: 0, eye_y: 0, eye_scale: 0 });
+  const [activeSubspace, setActiveSubspace] = useState<'macro' | 'micro'>('macro');
+  const [macroVector, setMacroVector] = useState<MacroVector>({ global_x: 0, global_y: 0, global_scale: 0 });
+  const [microVector, setMicroVector] = useState<MicroVector>({
+    upper_eye_rotation: 0,
+    pupil_x: 0,
+    lower_upper_distance_y: 0,
+  });
 
   useEffect(() => {
     if (!sessionId) {
@@ -525,28 +550,11 @@ export default function EvaluatePage() {
     void loadRenderPayload();
   }, [apiBaseUrl, sessionId]);
 
-  const loadCandidates = useCallback(async (
-    roundIndex: number,
-    options?: {
-      center?: CenterVector;
-      trustRegion?: { x: number; y: number; scale: number };
-    },
-  ) => {
+  const loadCandidates = useCallback(async (roundIndex: number) => {
     const query = new URLSearchParams({
       round_index: String(roundIndex),
       k: String(BO_CANDIDATE_COUNT),
     });
-
-    if (options?.center) {
-      query.set('center_x', options.center.eye_x.toFixed(4));
-      query.set('center_y', options.center.eye_y.toFixed(4));
-      query.set('center_scale', options.center.eye_scale.toFixed(4));
-    }
-    if (options?.trustRegion) {
-      query.set('trust_radius_x', options.trustRegion.x.toFixed(4));
-      query.set('trust_radius_y', options.trustRegion.y.toFixed(4));
-      query.set('trust_radius_scale', options.trustRegion.scale.toFixed(4));
-    }
 
     const response = await fetch(`${apiBaseUrl}/sessions/${sessionId}/bo/next?${query.toString()}`, { method: 'GET' });
 
@@ -556,24 +564,15 @@ export default function EvaluatePage() {
 
     const data = (await response.json()) as BONextResponse;
     setCandidates(data.candidates);
+    setActiveSubspace(data.active_subspace);
     setBoStrategy(data.strategy);
     setTrainingSize(data.training_size);
-    if (data.center) {
-      setCenterVector(data.center);
+    if (data.candidates.length > 0) {
+      // The non-active side is fixed for the current round and can be read from any candidate.
+      setMacroVector(data.candidates[0].macro);
+      setMicroVector(data.candidates[0].micro);
     }
   }, [apiBaseUrl, sessionId]);
-
-  const buildTrustRegion = useCallback(() => {
-    if (!renderPayload) {
-      return { x: 0.6, y: 0.6, scale: 2.0 };
-    }
-    return {
-      // Convert 3px radius to BO's percent unit.
-      x: (3 / renderPayload.canvasSize.width) * 100,
-      y: (3 / renderPayload.canvasSize.height) * 100,
-      scale: 2.0,
-    };
-  }, [renderPayload]);
 
   const loadFinalBoResult = useCallback(async () => {
     if (!sessionId) {
@@ -646,16 +645,14 @@ export default function EvaluatePage() {
       setSelected((current) => [...current, `${round}:${id}`]);
       const chosen = variants.find((variant) => variant.id === id);
       if (chosen) {
-        setCenterVector(chosen.vector);
+        setMacroVector(chosen.macro);
+        setMicroVector(chosen.micro);
       }
       const nextRound = Math.min(MAX_ROUNDS, round + 1);
       setRound(nextRound);
 
       if (nextRound < MAX_ROUNDS) {
-        await loadCandidates(nextRound, {
-          center: chosen?.vector ?? centerVector,
-          trustRegion: buildTrustRegion(),
-        });
+        await loadCandidates(nextRound);
       } else {
         await loadFinalBoResult();
       }
@@ -669,27 +666,6 @@ export default function EvaluatePage() {
   };
 
   const isDone = round >= MAX_ROUNDS;
-
-  const handleCenterCommit = useCallback(async (next: CenterVector) => {
-    if (boStatus === 'loading' || boStatus === 'submitting' || !sessionId || isDone) {
-      return;
-    }
-
-    try {
-      setBoStatus('loading');
-      setBoError('');
-      setCenterVector(next);
-      await loadCandidates(round, {
-        center: next,
-        trustRegion: buildTrustRegion(),
-      });
-      setBoStatus('idle');
-    } catch (error) {
-      console.error(error);
-      setBoStatus('error');
-      setBoError('局所候補の取得に失敗しました。');
-    }
-  }, [boStatus, sessionId, isDone, loadCandidates, round, buildTrustRegion]);
 
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_90%_10%,_#ffe4e6_0%,_#ecfeff_45%,_#f8fafc_100%)] px-2 py-6 sm:px-4">
@@ -763,6 +739,10 @@ export default function EvaluatePage() {
               <p className="text-xs font-semibold text-slate-500">Status</p>
               <p className="text-sm font-bold text-slate-800">{boStatus}</p>
             </div>
+            <div>
+              <p className="text-xs font-semibold text-slate-500">Active Subspace</p>
+              <p className="text-sm font-bold text-slate-800">{activeSubspace}</p>
+            </div>
           </div>
         ) : null}
 
@@ -793,9 +773,12 @@ export default function EvaluatePage() {
                 </div>
                 <div className="rounded-xl border border-emerald-200 bg-white p-4 text-sm text-slate-700">
                   <p className="font-semibold text-slate-900">推定パラメータ</p>
-                  <p className="mt-2">Eye x: {finalBoResult.candidate.vector.eye_x}%</p>
-                  <p>Eye y: {finalBoResult.candidate.vector.eye_y}%</p>
-                  <p>Eye scale: {finalBoResult.candidate.vector.eye_scale}%</p>
+                      <p>Global x: {finalBoResult.candidate.macro.global_x.toFixed(2)}%</p>
+                      <p>Global y: {finalBoResult.candidate.macro.global_y.toFixed(2)}%</p>
+                      <p>Global scale: {finalBoResult.candidate.macro.global_scale.toFixed(2)}%</p>
+                      <p className="mt-2">Upper rotation: {finalBoResult.candidate.micro.upper_eye_rotation.toFixed(2)}deg</p>
+                      <p>Pupil x: {finalBoResult.candidate.micro.pupil_x.toFixed(2)}%</p>
+                      <p>Lower-upper y: {finalBoResult.candidate.micro.lower_upper_distance_y.toFixed(2)}%</p>
                   <p className="mt-3 text-xs text-slate-500">
                     acquisition: {finalBoResult.candidate.acquisition === null ? 'N/A' : finalBoResult.candidate.acquisition.toFixed(3)}
                   </p>
@@ -821,31 +804,23 @@ export default function EvaluatePage() {
               <p className="text-xs font-semibold text-slate-600">Scale 微調整</p>
               <input
                 type="range"
-                min={-20}
-                max={20}
+                min={-6}
+                max={6}
                 step={0.1}
-                value={centerVector.eye_scale}
+                value={macroVector.global_scale}
                 disabled={isDone || boStatus === 'loading' || boStatus === 'submitting'}
                 onChange={(event) => {
                   const next = {
-                    ...centerVector,
-                    eye_scale: Number.parseFloat(event.target.value),
+                    ...macroVector,
+                    global_scale: Number.parseFloat(event.target.value),
                   };
-                  setCenterVector(next);
+                  setMacroVector(next);
                 }}
                 className="mt-2 w-full"
               />
               <p className="mt-2 text-xs text-slate-500">
-                x {centerVector.eye_x.toFixed(2)}% / y {centerVector.eye_y.toFixed(2)}% / scale {centerVector.eye_scale.toFixed(2)}%
+                x {macroVector.global_x.toFixed(2)}% / y {macroVector.global_y.toFixed(2)}% / scale {macroVector.global_scale.toFixed(2)}%
               </p>
-              <button
-                type="button"
-                onClick={() => void handleCenterCommit(centerVector)}
-                disabled={isDone || boStatus === 'loading' || boStatus === 'submitting' || !renderPayload}
-                className="mt-2 rounded-lg border border-rose-300 bg-rose-50 px-3 py-1 text-xs font-semibold text-rose-700 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                この位置で候補更新
-              </button>
             </div>
           </div>
 
@@ -853,12 +828,10 @@ export default function EvaluatePage() {
             {renderPayload ? (
               <InteractiveCanvas
                 renderPayload={renderPayload}
-                centerVector={centerVector}
+                macroVector={macroVector}
+                microVector={microVector}
                 disabled={isDone || boStatus === 'loading' || boStatus === 'submitting'}
-                onCenterChange={setCenterVector}
-                onCommit={(next) => {
-                  void handleCenterCommit(next);
-                }}
+                onMacroChange={setMacroVector}
               />
             ) : (
               <div className="grid aspect-[4/3] place-items-center rounded-xl border border-slate-200 bg-slate-100 text-sm text-slate-500">
